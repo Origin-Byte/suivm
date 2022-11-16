@@ -1,39 +1,31 @@
-use std::cmp::min;
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
+use reqwest::blocking::Client;
 use reqwest::header::USER_AGENT;
 use semver::Version;
 use serde::{de, Deserialize};
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::os::unix::io;
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::path::Path;
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::Client;
-use futures_util::StreamExt;
-use futures_util::stream::stream::StreamExt;
+use std::path::PathBuf;
 
-use crate::fs::copy;
-
-
-#[derive(Deserialize)]
-#[derive(Debug)]
+#[derive(Deserialize, Debug)]
 struct GithubRelease {
     #[serde(rename = "tag_name", deserialize_with = "version_deserializer")]
     version: semver::Version,
-    assets_url: String
+    assets_url: String,
 }
 
 fn version_deserializer<'de, D>(deserializer: D) -> Result<semver::Version, D::Error>
-    where
-        D: de::Deserializer<'de>,
+where
+    D: de::Deserializer<'de>,
 {
     let s: &str = de::Deserialize::deserialize(deserializer)?;
     // println!("{} / {} / {}", s.trim_start_matches("refs/tags/private-testnet-"), s.trim_start_matches("refs/tags/devnet-").trim_start_matches("_v"), s.trim_start_matches("refs/tags/private-testnet-").trim_start_matches("refs/tags/devnet-").trim_start_matches("refs/tags/sui_v").trim_end_matches("_ci").replace("2022-08-15","0.8.15"));
-    let val = Version::parse(s.trim_start_matches("devnet-")).unwrap_or(semver::Version::new(0,0,0));
+    let val =
+        Version::parse(s.trim_start_matches("devnet-")).unwrap_or(semver::Version::new(0, 0, 0));
     Ok(val)
 }
 
@@ -107,40 +99,19 @@ pub fn update() -> Result<()> {
     switch_version(version, false)
 }
 
-pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<(), String> {
+pub fn download_file(client: &Client, url: &str, path: &str) -> Result<()> {
     // Reqwest setup
-    let res = client
+    let mut res = client
         .get(url)
         .send()
-        .await
-        .or(Err(format!("Failed to GET from '{}'", &url)))?;
-    let total_size = res
-        .content_length()
-        .ok_or(format!("Failed to get content length from '{}'", &url))?;
-
-    // Indicatif setup
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap()
-        .progress_chars("#>-"));
-    pb.set_message(&format!("Downloading {}", url));
+        .context(format!("Failed to GET from '{}'", &url))?;
 
     // download chunks
-    let mut file = File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
-    let mut downloaded: u64 = 0;
-    let mut stream = res.bytes_stream();
+    let mut file = File::create(path).context(format!("Failed to create file '{}'", path))?;
+    res.copy_to(&mut file)
+        .context(format!("Failed to write res to file '{}'", path))?;
 
-    while let Some(item) = stream.next().await {
-        let chunk = item.or(Err(format!("Error while downloading file")))?;
-        file.write_all(&chunk)
-            .or(Err(format!("Error while writing to file")))?;
-        let new = min(downloaded + (chunk.len() as u64), total_size);
-        downloaded = new;
-        pb.set_position(new);
-    }
-
-    pb.finish_with_message(&format!("Downloaded {} to {}", url, path));
-    return Ok(());
+    Ok(())
 }
 
 /// Install a version of sui
@@ -152,7 +123,19 @@ pub fn switch_version(version: &Version, force: bool) -> Result<()> {
         return Ok(());
     }
     let client = Client::new();
-    download_file(&client, &format!("https://github.com/MystenLabs/sui/releases/download/devnet-{}/sui", &version), &SUIVM_HOME.join("bin").join(format!("sui-{}", version)).as_os_str().to_str().unwrap());
+    download_file(
+        &client,
+        &format!(
+            "https://github.com/MystenLabs/sui/releases/download/devnet-{}/sui",
+            &version
+        ),
+        SUIVM_HOME
+            .join("bin")
+            .join(format!("sui-{}", version))
+            .as_os_str()
+            .to_str()
+            .unwrap(),
+    )?;
 
     // if !exit.status.success() {
     //     return Err(anyhow!(
@@ -212,14 +195,19 @@ pub fn fetch_versions() -> Vec<semver::Version> {
         .unwrap()
         .json()
         .unwrap();
-    versions.into_iter().filter(|r| r.version.to_string() != semver::Version::new(0,0,0).to_string()).rev().map(|r| r.version).collect()
+    versions
+        .into_iter()
+        .filter(|r| r.version.to_string() != semver::Version::new(0, 0, 0).to_string())
+        .rev()
+        .map(|r| r.version)
+        .collect()
 }
 
 /// Print available versions and flags indicating installed, current and latest
 pub fn list_versions() -> Result<()> {
     let installed_versions = read_installed_versions();
 
-    let mut available_versions = fetch_versions();
+    let available_versions = fetch_versions();
 
     available_versions.iter().enumerate().for_each(|(i, v)| {
         print!("{}", v);
@@ -254,7 +242,7 @@ pub fn read_installed_versions() -> Vec<semver::Version> {
     println!("{}", home_dir.display());
     let mut versions = vec![];
     let home_exists: bool = Path::new(&home_dir).is_dir();
-    if home_exists == false {
+    if !home_exists {
         return versions;
     }
     for file in fs::read_dir(&home_dir.join("bin")).unwrap() {
