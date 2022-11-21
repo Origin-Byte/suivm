@@ -1,6 +1,6 @@
 mod cmd;
-use clap::Parser;
 use anyhow::{Error, Result};
+use clap::Parser;
 use semver::Version;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
