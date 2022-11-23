@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use indicatif::{ProgressBar, ProgressStyle};
+
 
 #[derive(Deserialize, Debug)]
 struct GithubRelease {
@@ -99,24 +101,61 @@ pub fn update() -> Result<()> {
     switch_version(version, false)
 }
 
-pub fn download_file(client: &Client, url: &str, path: &str) -> Result<()> {
-    // Reqwest setup
-    let mut res = client
+pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<()> {
+    let res = client
         .get(url)
         .send()
-        .context(format!("Failed to GET from '{}'", &url))?;
+        .await
+        .or(Err(format!("Failed to GET from '{}'", &url)))?;
+    let total_size = res
+        .content_length()
+        .ok_or(format!("Failed to get content length from '{}'", &url))?;
 
-    // download chunks
-    let mut file = File::create(path).context(format!("Failed to create file '{}'", path))?;
-    res.copy_to(&mut file)
-        .context(format!("Failed to write res to file '{}'", path))?;
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .progress_chars("█  "));
+    pb.set_message(&format!("Downloading {}", url));
 
-    Ok(())
+    let mut file;
+    let mut downloaded: u64 = 0;
+    let mut stream = res.bytes_stream();
+
+    println!("Seeking in file.");
+    if std::path::Path::new(path).exists() {
+        println!("File exists. Resuming.");
+        file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+
+        let file_size = std::fs::metadata(path).unwrap().len();
+        file.seek(std::io::SeekFrom::Start(file_size)).unwrap();
+        downloaded = file_size;
+
+    } else {
+        println!("Fresh file..");
+        file = File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
+    }
+
+    println!("Commencing transfer");
+    while let Some(item) = stream.next().await {
+        let chunk = item.or(Err(format!("Error while downloading file")))?;
+        file.write(&chunk)?;
+        let new = min(downloaded + (chunk.len() as u64), total_size);
+        downloaded = new;
+        pb.set_position(new);
+    }
+
+    pb.finish_with_message(&format!("Downloaded {} to {}", url, path));
+    return Ok(());
 }
 
 /// Install a version of sui
 pub fn switch_version(version: &Version, force: bool) -> Result<()> {
     // If version is already installed we ignore the request.
+    ensure_paths();
     let installed_versions = read_installed_versions();
     if installed_versions.contains(version) && !force {
         println!("Version {} is already installed", version);
@@ -135,7 +174,7 @@ pub fn switch_version(version: &Version, force: bool) -> Result<()> {
             .as_os_str()
             .to_str()
             .unwrap(),
-    )?;
+    ).await.unwrap();
 
     // if !exit.status.success() {
     //     return Err(anyhow!(
@@ -158,6 +197,7 @@ pub fn switch_version(version: &Version, force: bool) -> Result<()> {
 
 /// Remove an installed version of sui
 pub fn uninstall_version(version: &Version) -> Result<()> {
+    ensure_paths();
     let version_path = SUIVM_HOME.join("bin").join(format!("sui-{}", version));
     if !version_path.exists() {
         return Err(anyhow!("sui {} is not installed", version));
@@ -205,6 +245,7 @@ pub fn fetch_versions() -> Vec<semver::Version> {
 
 /// Print available versions and flags indicating installed, current and latest
 pub fn list_versions() -> Result<()> {
+    ensure_paths();
     let installed_versions = read_installed_versions();
 
     let available_versions = fetch_versions();
