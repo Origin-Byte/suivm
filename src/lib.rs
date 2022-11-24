@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Deserialize, Debug)]
 struct GithubRelease {
@@ -96,6 +97,9 @@ pub fn use_version(version: &Version) -> Result<()> {
         fs::File::create(current_version_file_path().as_path())?;
     current_version_file.write_all(version.to_string().as_bytes())?;
     println!("Now using sui version {}.", current_version()?);
+    let path = current_version()?;
+    let setSui = format!("export PATH=$PATH:{path}");
+    Command::new(setSui);
     Ok(())
 }
 
@@ -169,28 +173,27 @@ pub async fn download_file(
 /// Install a version of sui
 pub async fn switch_version(version: &Version, force: bool) -> Result<()> {
     // If version is already installed we ignore the request.
-    ensure_paths();
     let installed_versions = read_installed_versions();
-    if installed_versions.contains(version) && !force {
-        println!("Version {} is already installed", version);
-        return Ok(());
+    if !(installed_versions.contains(version) && !force) {
+        let client = reqwest::Client::new();
+        download_file(
+            &client,
+            &format!(
+                "https://github.com/MystenLabs/sui/releases/download/devnet-{}/sui",
+                &version
+            ),
+            SUIVM_HOME
+                .join("bin")
+                .join(format!("sui-{}", version))
+                .as_os_str()
+                .to_str()
+                .unwrap(),
+        )
+            .await
+            .unwrap();
     }
-    let client = reqwest::Client::new();
-    download_file(
-        &client,
-        &format!(
-            "https://github.com/MystenLabs/sui/releases/download/devnet-{}/sui",
-            &version
-        ),
-        SUIVM_HOME
-            .join("bin")
-            .join(format!("sui-{}", version))
-            .as_os_str()
-            .to_str()
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    println!("Version {} is already installed", version);
+    //return Ok(());
 
     // if !exit.status.success() {
     //     return Err(anyhow!(
@@ -198,10 +201,10 @@ pub async fn switch_version(version: &Version, force: bool) -> Result<()> {
     //         version
     //     ));
     // }
-    // fs::rename(
-    //     &SUIVM_HOME.join("bin").join("sui"),
-    //     &SUIVM_HOME.join("bin").join(format!("sui-{}", version)),
-    // )?;
+    fs::rename(
+        &SUIVM_HOME.join("bin").join("sui"),
+        &SUIVM_HOME.join("bin").join(format!("sui-{}", version)),
+    )?;
     // If .version file is empty or not parseable, write the newly installed version to it
     if current_version().is_err() {
         let mut current_version_file =
@@ -214,7 +217,6 @@ pub async fn switch_version(version: &Version, force: bool) -> Result<()> {
 
 /// Remove an installed version of sui
 pub fn uninstall_version(version: &Version) -> Result<()> {
-    ensure_paths();
     let version_path = SUIVM_HOME.join("bin").join(format!("sui-{}", version));
     if !version_path.exists() {
         return Err(anyhow!("sui {} is not installed", version));
@@ -267,7 +269,6 @@ pub async fn fetch_versions() -> Result<Vec<semver::Version>> {
 
 /// Print available versions and flags indicating installed, current and latest
 pub async fn list_versions() -> Result<()> {
-    ensure_paths();
     let installed_versions = read_installed_versions();
 
     let available_versions = fetch_versions().await?;

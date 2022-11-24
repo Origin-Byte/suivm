@@ -53,6 +53,7 @@ async fn parse_version(version: &str) -> Result<Version, Error> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    suivm::ensure_paths();
     match Suivm::parse() {
         Suivm::List => suivm::list_versions().await,
         Suivm::Uninstall { version } => {
