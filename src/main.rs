@@ -13,13 +13,13 @@ enum Suivm {
     List,
     #[clap(about = "Uninstall a version of suivm")]
     Uninstall {
-        #[clap(value_parser(parse_version))]
-        version: Version,
+        version: String,
     },
-    #[clap(about = "Switch to specified version of suivm and install it if missing")]
+    #[clap(
+        about = "Switch to specified version of suivm and install it if missing"
+    )]
     Switch {
-        #[clap(value_parser(parse_version))]
-        version: Version,
+        version: String,
         #[clap(long)]
         /// Flag to force installation even if the version
         /// is already installed
@@ -43,20 +43,25 @@ enum Suivm {
 // }
 
 // If `latest` is passed use the latest available version.
-fn parse_version(version: &str) -> Result<Version, Error> {
+async fn parse_version(version: &str) -> Result<Version, Error> {
     if version == "latest" {
-        Ok(suivm::get_latest_version())
+        suivm::get_latest_version().await
     } else {
         Version::parse(version).map_err(|e| anyhow::anyhow!(e))
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     match Suivm::parse() {
-        Suivm::List => suivm::list_versions(),
-        Suivm::Uninstall { version } => suivm::uninstall_version(&version),
-        Suivm::Switch { version, force } => suivm::switch_version(&version, force),
-        Suivm::Latest => suivm::list_versions(),
-        Suivm::ListLocal => suivm::list_versions(),
+        Suivm::List => suivm::list_versions().await,
+        Suivm::Uninstall { version } => {
+            suivm::uninstall_version(&parse_version(&version).await?)
+        }
+        Suivm::Switch { version, force } => {
+            suivm::switch_version(&parse_version(&version).await?, force).await
+        }
+        Suivm::Latest => suivm::list_versions().await,
+        Suivm::ListLocal => suivm::list_versions().await,
     }
 }

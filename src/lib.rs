@@ -1,17 +1,17 @@
 use anyhow::Context;
 use anyhow::{anyhow, Result};
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
-use reqwest::blocking::Client;
 use reqwest::header::USER_AGENT;
 use semver::Version;
 use serde::{de, Deserialize};
+use std::cmp;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use indicatif::{ProgressBar, ProgressStyle};
-
 
 #[derive(Deserialize, Debug)]
 struct GithubRelease {
@@ -20,14 +20,16 @@ struct GithubRelease {
     assets_url: String,
 }
 
-fn version_deserializer<'de, D>(deserializer: D) -> Result<semver::Version, D::Error>
+fn version_deserializer<'de, D>(
+    deserializer: D,
+) -> Result<semver::Version, D::Error>
 where
     D: de::Deserializer<'de>,
 {
     let s: &str = de::Deserialize::deserialize(deserializer)?;
     // println!("{} / {} / {}", s.trim_start_matches("refs/tags/private-testnet-"), s.trim_start_matches("refs/tags/devnet-").trim_start_matches("_v"), s.trim_start_matches("refs/tags/private-testnet-").trim_start_matches("refs/tags/devnet-").trim_start_matches("refs/tags/sui_v").trim_end_matches("_ci").replace("2022-08-15","0.8.15"));
-    let val =
-        Version::parse(s.trim_start_matches("devnet-")).unwrap_or(semver::Version::new(0, 0, 0));
+    let val = Version::parse(s.trim_start_matches("devnet-"))
+        .unwrap_or(semver::Version::new(0, 0, 0));
     Ok(val)
 }
 
@@ -78,7 +80,10 @@ pub fn use_version(version: &Version) -> Result<()> {
                 version, current
             );
         } else {
-            println!("Version {} is not installed, no current version.", version);
+            println!(
+                "Version {} is not installed, no current version.",
+                version
+            );
         }
 
         return Err(anyhow!(
@@ -87,35 +92,41 @@ pub fn use_version(version: &Version) -> Result<()> {
         ));
     }
 
-    let mut current_version_file = fs::File::create(current_version_file_path().as_path())?;
+    let mut current_version_file =
+        fs::File::create(current_version_file_path().as_path())?;
     current_version_file.write_all(version.to_string().as_bytes())?;
     println!("Now using sui version {}.", current_version()?);
     Ok(())
 }
 
 /// Update to the latest version
-pub fn update() -> Result<()> {
+pub async fn update() -> Result<()> {
     // Find last stable version
-    let version = &get_latest_version();
+    let version = &get_latest_version().await?;
 
-    switch_version(version, false)
+    switch_version(version, false).await
 }
 
-pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<()> {
+pub async fn download_file(
+    client: &reqwest::Client,
+    url: &str,
+    path: &str,
+) -> Result<()> {
     let res = client
         .get(url)
         .send()
         .await
-        .or(Err(format!("Failed to GET from '{}'", &url)))?;
-    let total_size = res
-        .content_length()
-        .ok_or(format!("Failed to get content length from '{}'", &url))?;
+        .with_context(|| format!("Failed to GET from '{}'", &url))?;
+    let total_size = res.content_length().with_context(|| {
+        format!("Failed to get content length from '{}'", &url)
+    })?;
 
     let pb = ProgressBar::new(total_size);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .unwrap()
         .progress_chars("█  "));
-    pb.set_message(&format!("Downloading {}", url));
+    pb.set_message(format!("Downloading {}", url));
 
     let mut file;
     let mut downloaded: u64 = 0;
@@ -133,27 +144,30 @@ pub async fn download_file(client: &Client, url: &str, path: &str) -> Result<()>
         let file_size = std::fs::metadata(path).unwrap().len();
         file.seek(std::io::SeekFrom::Start(file_size)).unwrap();
         downloaded = file_size;
-
     } else {
         println!("Fresh file..");
-        file = File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
+        file = File::create(path)
+            .with_context(|| format!("Failed to create file '{}'", path))?;
     }
 
     println!("Commencing transfer");
     while let Some(item) = stream.next().await {
-        let chunk = item.or(Err(format!("Error while downloading file")))?;
+        let chunk =
+            item.with_context(|| format!("Error while downloading file"))?;
+        // BUG: the chuck might not be written all at once
         file.write(&chunk)?;
-        let new = min(downloaded + (chunk.len() as u64), total_size);
+        let new = cmp::min(downloaded + (chunk.len() as u64), total_size);
         downloaded = new;
         pb.set_position(new);
     }
 
-    pb.finish_with_message(&format!("Downloaded {} to {}", url, path));
-    return Ok(());
+    pb.finish_with_message(format!("Downloaded {} to {}", url, path));
+
+    Ok(())
 }
 
 /// Install a version of sui
-pub fn switch_version(version: &Version, force: bool) -> Result<()> {
+pub async fn switch_version(version: &Version, force: bool) -> Result<()> {
     // If version is already installed we ignore the request.
     ensure_paths();
     let installed_versions = read_installed_versions();
@@ -161,7 +175,7 @@ pub fn switch_version(version: &Version, force: bool) -> Result<()> {
         println!("Version {} is already installed", version);
         return Ok(());
     }
-    let client = Client::new();
+    let client = reqwest::Client::new();
     download_file(
         &client,
         &format!(
@@ -174,7 +188,9 @@ pub fn switch_version(version: &Version, force: bool) -> Result<()> {
             .as_os_str()
             .to_str()
             .unwrap(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // if !exit.status.success() {
     //     return Err(anyhow!(
@@ -188,7 +204,8 @@ pub fn switch_version(version: &Version, force: bool) -> Result<()> {
     // )?;
     // If .version file is empty or not parseable, write the newly installed version to it
     if current_version().is_err() {
-        let mut current_version_file = fs::File::create(current_version_file_path().as_path())?;
+        let mut current_version_file =
+            fs::File::create(current_version_file_path().as_path())?;
         current_version_file.write_all(version.to_string().as_bytes())?;
     }
 
@@ -213,42 +230,47 @@ pub fn uninstall_version(version: &Version) -> Result<()> {
 pub fn ensure_paths() {
     let home_dir = SUIVM_HOME.to_path_buf();
     if !home_dir.as_path().exists() {
-        fs::create_dir_all(home_dir.clone()).expect("Could not create .suivm directory");
+        fs::create_dir_all(home_dir.clone())
+            .expect("Could not create .suivm directory");
     }
     let bin_dir = home_dir.join("bin");
     if !bin_dir.as_path().exists() {
-        fs::create_dir_all(bin_dir).expect("Could not create .suivm/bin directory");
+        fs::create_dir_all(bin_dir)
+            .expect("Could not create .suivm/bin directory");
     }
     if !current_version_file_path().exists() {
-        fs::File::create(current_version_file_path()).expect("Could not create .version file");
+        fs::File::create(current_version_file_path())
+            .expect("Could not create .version file");
     }
 }
 
 /// Retrieve a list of installable versions of sui using the GitHub API and tags on the Sui
 /// repository.
-pub fn fetch_versions() -> Vec<semver::Version> {
-    let client = reqwest::blocking::Client::new();
+pub async fn fetch_versions() -> Result<Vec<semver::Version>> {
+    let client = reqwest::Client::new();
     let versions: Vec<GithubRelease> = client
         .get("https://api.github.com/repos/MystenLabs/sui/releases")
         .header(USER_AGENT, "suivm https://github.com/MystenLabs/sui")
         .send()
-        .unwrap()
+        .await?
         .json()
-        .unwrap();
-    versions
+        .await?;
+    Ok(versions
         .into_iter()
-        .filter(|r| r.version.to_string() != semver::Version::new(0, 0, 0).to_string())
+        .filter(|r| {
+            r.version.to_string() != semver::Version::new(0, 0, 0).to_string()
+        })
         .rev()
         .map(|r| r.version)
-        .collect()
+        .collect())
 }
 
 /// Print available versions and flags indicating installed, current and latest
-pub fn list_versions() -> Result<()> {
+pub async fn list_versions() -> Result<()> {
     ensure_paths();
     let installed_versions = read_installed_versions();
 
-    let available_versions = fetch_versions();
+    let available_versions = fetch_versions().await?;
 
     available_versions.iter().enumerate().for_each(|(i, v)| {
         print!("{}", v);
@@ -259,7 +281,8 @@ pub fn list_versions() -> Result<()> {
         if installed_versions.contains(v) {
             flags.push("installed");
         }
-        if current_version().is_ok() && current_version().unwrap() == v.clone() {
+        if current_version().is_ok() && current_version().unwrap() == v.clone()
+        {
             flags.push("current");
         }
         if flags.is_empty() {
@@ -272,9 +295,9 @@ pub fn list_versions() -> Result<()> {
     Ok(())
 }
 
-pub fn get_latest_version() -> semver::Version {
-    let available_versions = fetch_versions();
-    available_versions.first().unwrap().clone()
+pub async fn get_latest_version() -> Result<semver::Version> {
+    let available_versions = fetch_versions().await?;
+    Ok(available_versions.first().unwrap().clone())
 }
 
 /// Read the installed anchor-cli versions by reading the binaries in the SUIVM_HOME/bin directory.
@@ -343,7 +366,9 @@ mod tests {
         // Sync the file to disk before the read in current_version() to
         // mitigate the read not seeing the written version bytes.
         current_version_file.sync_all().unwrap();
-        assert!(current_version().unwrap() == Version::parse("0.14.0").unwrap());
+        assert!(
+            current_version().unwrap() == Version::parse("0.14.0").unwrap()
+        );
     }
 
     #[test]
@@ -377,7 +402,8 @@ mod tests {
         let expected = vec![version];
         assert!(read_installed_versions() == expected);
         // Should ignore this file because its not sui- prefixed
-        fs::File::create(SUIVM_HOME.join("bin").join("garbage").as_path()).unwrap();
+        fs::File::create(SUIVM_HOME.join("bin").join("garbage").as_path())
+            .unwrap();
         assert!(read_installed_versions() == expected);
     }
 }
