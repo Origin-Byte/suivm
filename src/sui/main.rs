@@ -6,7 +6,7 @@ fn main() -> anyhow::Result<()> {
     let version = suivm::current_version()
         .map_err(|_e| anyhow::anyhow!("suivm version not set. Please run `suivm use latest`."))?;
 
-    let binary_path = avm::version_binary_path(&version);
+    let binary_path = suivm::version_binary_path(&version);
     if fs::metadata(&binary_path).is_err() {
         anyhow::bail!(
             "sui-cli {} not installed. Please run `suivm use {}`.",
