@@ -66,7 +66,7 @@ pub fn current_version() -> Result<Version> {
 /// Path to the binary for the given version
 pub fn version_binary_path(version: &Version) -> PathBuf {
     let mut version_path = SUIVM_HOME.join("bin");
-    version_path.push(format!("anchor-{}", version));
+    version_path.push(format!("sui-{}", version));
     version_path
 }
 
@@ -301,7 +301,7 @@ pub async fn get_latest_version() -> Result<semver::Version> {
     Ok(available_versions.first().unwrap().clone())
 }
 
-/// Read the installed anchor-cli versions by reading the binaries in the SUIVM_HOME/bin directory.
+/// Read the installed sui-cli versions by reading the binaries in the SUIVM_HOME/bin directory.
 pub fn read_installed_versions() -> Vec<semver::Version> {
     let home_dir = SUIVM_HOME.to_path_buf();
     println!("{}", home_dir.display());
