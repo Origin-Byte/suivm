@@ -1,22 +1,18 @@
-## suivm
-Sui Version Manager
+# suivm
 
----
+Sui Version Manager (`suivm`) is a tool for managing multiple versions of Sui CLI.
 
 ## Install
 
-
-Sui Version Manager is a tool for using multiple versions of the sui-cli.
-
-Install avm using Cargo. `Note! this will replace your sui binary if you had one installed.`
-
+Install `suivm` using `cargo`:
 
 ```bash
-cargo install --git https://github.com/origin-byte/suivm --locked --force
+cargo install --git https://github.com/origin-byte/suivm --locked
 ```
 
-Verify the installation.
+Verify the installation:
 
-`suivm switch latest`
-
-`sui --version`
+```bash
+suivm use latest
+sui --version
+```

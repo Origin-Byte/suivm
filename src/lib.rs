@@ -1,410 +1,230 @@
-use anyhow::Context;
-use anyhow::{anyhow, Result};
-use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
-use once_cell::sync::Lazy;
-use reqwest::header::USER_AGENT;
-use semver::Version;
-use serde::{de, Deserialize};
-use std::cmp;
+use anyhow::Result;
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
+use serde::Deserialize;
 use std::fs;
 use std::fs::File;
-use std::io::{Seek, Write};
-use std::path::Path;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Deserialize, Debug)]
 struct GithubRelease {
-    #[serde(rename = "tag_name", deserialize_with = "version_deserializer")]
-    version: semver::Version,
-    assets_url: String,
+    #[serde(rename = "tag_name")]
+    version: String,
 }
 
-fn version_deserializer<'de, D>(
-    deserializer: D,
-) -> Result<semver::Version, D::Error>
-where
-    D: de::Deserializer<'de>,
-{
-    let s: &str = de::Deserialize::deserialize(deserializer)?;
-    // println!("{} / {} / {}", s.trim_start_matches("refs/tags/private-testnet-"), s.trim_start_matches("refs/tags/devnet-").trim_start_matches("_v"), s.trim_start_matches("refs/tags/private-testnet-").trim_start_matches("refs/tags/devnet-").trim_start_matches("refs/tags/sui_v").trim_end_matches("_ci").replace("2022-08-15","0.8.15"));
-    let val = Version::parse(s.trim_start_matches("devnet-"))
-        .unwrap_or(semver::Version::new(0, 0, 0));
-    Ok(val)
+fn directory_suivm() -> PathBuf {
+    let mut home = dirs::home_dir().expect("Could not find home directory");
+    home.push(".suivm");
+    fs::create_dir_all(&home).unwrap();
+    home
 }
 
-/// Storage directory for SUIVM, ~/.suivm
-pub static SUIVM_HOME: Lazy<PathBuf> = Lazy::new(|| {
-    cfg_if::cfg_if! {
-        if #[cfg(test)] {
-            let dir = tempfile::tempdir().expect("Could not create temporary directory");
-            dir.path().join(".suivm")
-        } else {
-            let mut user_home = dirs::home_dir().expect("Could not find home directory");
-            user_home.push(".suivm");
-            user_home
-        }
-    }
-});
+fn directory_bin() -> PathBuf {
+    let mut bin = directory_suivm();
+    bin.push("bin");
+    fs::create_dir_all(&bin).unwrap();
+    bin
+}
 
-/// Path to the current version file ~/.suivm/.version
-pub fn current_version_file_path() -> PathBuf {
-    let mut current_version_file_path = SUIVM_HOME.to_path_buf();
-    current_version_file_path.push(".version");
-    current_version_file_path
+fn path_version() -> PathBuf {
+    let mut path = directory_suivm();
+    path.push(".version");
+    path
+}
+
+pub fn path_bin(version: &str) -> PathBuf {
+    let mut path = directory_bin();
+    path.push(version);
+    path
 }
 
 /// Read the current version from the version file
-pub fn current_version() -> Result<Version> {
-    let v = fs::read_to_string(current_version_file_path().as_path())
-        .map_err(|e| anyhow!("Could not read version file: {}", e))?;
-    Version::parse(v.trim_end_matches('\n').to_string().as_str())
-        .map_err(|e| anyhow!("Could not parse version file: {}", e))
+pub fn current_version() -> Option<String> {
+    File::open(path_version()).ok().and_then(|mut file| {
+        let mut v = String::new();
+        file.read_to_string(&mut v).unwrap();
+
+        (!v.is_empty()).then_some(v)
+    })
 }
 
-/// Path to the binary for the given version
-pub fn version_binary_path(version: &Version) -> PathBuf {
-    let mut version_path = SUIVM_HOME.join("bin");
-    version_path.push(format!("sui-{}", version));
-    version_path
-}
-
-/// Update the current version to a new version
-pub fn use_version(version: &Version) -> Result<()> {
-    let installed_versions = read_installed_versions();
+/// Install and use Sui version
+pub fn use_version(version: &String) -> Result<()> {
     // Make sure the requested version is installed
+    let installed_versions = fetch_installed_versions();
     if !installed_versions.contains(version) {
-        if let Ok(current) = current_version() {
-            println!(
-                "Version {} is not installed, staying on version {}.",
-                version, current
-            );
-        } else {
-            println!(
-                "Version {} is not installed, no current version.",
-                version
-            );
-        }
-
-        return Err(anyhow!(
-            "You need to run 'suivm install {}' to install it before using it.",
-            version
-        ));
+        install_version(version)?
     }
 
-    let mut current_version_file =
-        fs::File::create(current_version_file_path().as_path())?;
-    current_version_file.write_all(version.to_string().as_bytes())?;
-    println!("Now using sui version {}.", current_version()?);
-    let path = current_version()?;
-    let setSui = format!("export PATH=$PATH:{path}");
-    Command::new(setSui);
+    let mut current_version_file = File::create(path_version().as_path())?;
+    current_version_file.write_all(version.as_bytes())?;
+
+    println!("Using Sui `{}`", current_version().unwrap());
     Ok(())
 }
 
-/// Update to the latest version
-pub async fn update() -> Result<()> {
-    // Find last stable version
-    let version = &get_latest_version().await?;
+/// Install Sui version
+pub fn install_version(version: &str) -> Result<()> {
+    let url = &format!(
+        "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
+    );
 
-    switch_version(version, false).await
-}
+    let path = path_bin(version);
+    let mut file = File::create(&path)?;
 
-pub async fn download_file(
-    client: &reqwest::Client,
-    url: &str,
-    path: &str,
-) -> Result<()> {
-    let res = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("Failed to GET from '{}'", &url))?;
-    let total_size = res.content_length().with_context(|| {
-        format!("Failed to get content length from '{}'", &url)
-    })?;
-
-    let pb = ProgressBar::new(total_size);
+    let pb = ProgressBar::new(1);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
         .unwrap()
         .progress_chars("█  "));
-    pb.set_message(format!("Downloading {}", url));
+    pb.set_message(format!("Downloading {version}"));
 
-    let mut file;
-    let mut downloaded: u64 = 0;
-    let mut stream = res.bytes_stream();
+    let mut easy = curl::easy::Easy::new();
+    easy.url(&url)?;
+    easy.follow_location(true)?;
+    easy.progress(true)?;
 
-    println!("Seeking in file.");
-    if std::path::Path::new(path).exists() {
-        println!("File exists. Resuming.");
-        file = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-
-        let file_size = std::fs::metadata(path).unwrap().len();
-        file.seek(std::io::SeekFrom::Start(file_size)).unwrap();
-        downloaded = file_size;
-    } else {
-        println!("Fresh file..");
-        file = File::create(path)
-            .with_context(|| format!("Failed to create file '{}'", path))?;
+    {
+        let mut transfer = easy.transfer();
+        transfer.progress_function(|dtotal, dlnow, _, _| {
+            // hi
+            pb.set_length(dtotal as u64);
+            pb.set_position(dlnow as u64);
+            true
+        })?;
+        transfer.write_function(|buf| Ok(file.write(buf).unwrap()))?;
+        transfer.perform()?;
     }
 
-    println!("Commencing transfer");
-    while let Some(item) = stream.next().await {
-        let chunk =
-            item.with_context(|| format!("Error while downloading file"))?;
-        // BUG: the chuck might not be written all at once
-        file.write(&chunk)?;
-        let new = cmp::min(downloaded + (chunk.len() as u64), total_size);
-        downloaded = new;
-        pb.set_position(new);
-    }
-
-    pb.finish_with_message(format!("Downloaded {} to {}", url, path));
+    pb.finish_with_message(format!("Downloaded {version}"));
 
     Ok(())
 }
 
-/// Install a version of sui
-pub async fn switch_version(version: &Version, force: bool) -> Result<()> {
-    // If version is already installed we ignore the request.
-    let installed_versions = read_installed_versions();
-    if !(installed_versions.contains(version) && !force) {
-        let client = reqwest::Client::new();
-        download_file(
-            &client,
-            &format!(
-                "https://github.com/MystenLabs/sui/releases/download/devnet-{}/sui",
-                &version
-            ),
-            SUIVM_HOME
-                .join("bin")
-                .join(format!("sui-{}", version))
-                .as_os_str()
-                .to_str()
-                .unwrap(),
-        )
-            .await
-            .unwrap();
-    }
-    println!("Version {} is already installed", version);
-    //return Ok(());
-
-    // if !exit.status.success() {
-    //     return Err(anyhow!(
-    //         "Failed to install {}, is it a valid version?",
-    //         version
-    //     ));
-    // }
-    fs::rename(
-        &SUIVM_HOME.join("bin").join("sui"),
-        &SUIVM_HOME.join("bin").join(format!("sui-{}", version)),
-    )?;
-    // If .version file is empty or not parseable, write the newly installed version to it
-    if current_version().is_err() {
-        let mut current_version_file =
-            fs::File::create(current_version_file_path().as_path())?;
-        current_version_file.write_all(version.to_string().as_bytes())?;
+/// Uninstall Sui version
+pub fn uninstall_version(version: &str) -> Result<()> {
+    let current_version = current_version();
+    if matches!(current_version, Some(current) if current == version) {
+        let _ = fs::remove_file(path_version());
     }
 
-    use_version(version)
-}
+    // Silence failures
+    let _ = fs::remove_file(path_bin(version));
 
-/// Remove an installed version of sui
-pub fn uninstall_version(version: &Version) -> Result<()> {
-    let version_path = SUIVM_HOME.join("bin").join(format!("sui-{}", version));
-    if !version_path.exists() {
-        return Err(anyhow!("sui {} is not installed", version));
-    }
-    if version == &current_version().unwrap() {
-        return Err(anyhow!("sui {} is currently in use", version));
-    }
-    fs::remove_file(version_path.as_path())?;
+    println!("Uninstalled Sui `{version}`");
     Ok(())
-}
-
-/// Ensure the users home directory is setup with the paths required by AVM.
-pub fn ensure_paths() {
-    let home_dir = SUIVM_HOME.to_path_buf();
-    if !home_dir.as_path().exists() {
-        fs::create_dir_all(home_dir.clone())
-            .expect("Could not create .suivm directory");
-    }
-    let bin_dir = home_dir.join("bin");
-    if !bin_dir.as_path().exists() {
-        fs::create_dir_all(bin_dir)
-            .expect("Could not create .suivm/bin directory");
-    }
-    if !current_version_file_path().exists() {
-        fs::File::create(current_version_file_path())
-            .expect("Could not create .version file");
-    }
 }
 
 /// Retrieve a list of installable versions of sui using the GitHub API and tags on the Sui
 /// repository.
-pub async fn fetch_versions() -> Result<Vec<semver::Version>> {
-    let client = reqwest::Client::new();
-    let versions: Vec<GithubRelease> = client
-        .get("https://api.github.com/repos/MystenLabs/sui/releases")
-        .header(USER_AGENT, "suivm https://github.com/MystenLabs/sui")
-        .send()
-        .await?
-        .json()
-        .await?;
-    Ok(versions
-        .into_iter()
-        .filter(|r| {
-            r.version.to_string() != semver::Version::new(0, 0, 0).to_string()
-        })
-        .rev()
-        .map(|r| r.version)
-        .collect())
+pub fn fetch_versions() -> Result<Vec<String>> {
+    let mut dst = Vec::new();
+
+    let mut easy = curl::easy::Easy::new();
+    easy.url("https://api.github.com/repos/MystenLabs/sui/releases")?;
+    easy.useragent("suivm")?;
+
+    {
+        let mut transfer = easy.transfer();
+        transfer.write_function(|buf| {
+            dst.extend_from_slice(buf);
+            Ok(buf.len())
+        })?;
+        transfer.perform()?;
+    }
+
+    let versions: Vec<GithubRelease> = serde_json::from_slice(&dst)?;
+    Ok(versions.into_iter().map(|r| r.version).rev().collect())
 }
 
-/// Print available versions and flags indicating installed, current and latest
-pub async fn list_versions() -> Result<()> {
-    let installed_versions = read_installed_versions();
-
-    let available_versions = fetch_versions().await?;
-
-    available_versions.iter().enumerate().for_each(|(i, v)| {
-        print!("{}", v);
-        let mut flags = vec![];
-        if i == available_versions.len() - 1 {
-            flags.push("latest");
-        }
-        if installed_versions.contains(v) {
-            flags.push("installed");
-        }
-        if current_version().is_ok() && current_version().unwrap() == v.clone()
-        {
-            flags.push("current");
-        }
-        if flags.is_empty() {
-            println!();
-        } else {
-            println!("\t({})", flags.join(", "));
-        }
-    });
-
-    Ok(())
-}
-
-pub async fn get_latest_version() -> Result<semver::Version> {
-    let available_versions = fetch_versions().await?;
-    Ok(available_versions.first().unwrap().clone())
+pub fn fetch_latest_version() -> Result<String> {
+    let available_versions = fetch_versions()?;
+    Ok(available_versions.last().unwrap().clone())
 }
 
 /// Read the installed sui-cli versions by reading the binaries in the SUIVM_HOME/bin directory.
-pub fn read_installed_versions() -> Vec<semver::Version> {
-    let home_dir = SUIVM_HOME.to_path_buf();
-    println!("{}", home_dir.display());
-    let mut versions = vec![];
-    let home_exists: bool = Path::new(&home_dir).is_dir();
-    if !home_exists {
-        return versions;
-    }
-    for file in fs::read_dir(&home_dir.join("bin")).unwrap() {
-        let file_name = file.unwrap().file_name();
-        // Match only things that look like sui-*
-        if file_name.to_str().unwrap().starts_with("sui-") {
-            let version = file_name
-                .to_str()
+pub fn fetch_installed_versions() -> Vec<String> {
+    let home_dir = directory_bin();
+    fs::read_dir(&home_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|item| {
+            item.file_type()
                 .unwrap()
-                .trim_start_matches("sui-")
-                .parse::<semver::Version>()
-                .unwrap();
-            versions.push(version);
-        }
-    }
-
-    versions
+                .is_file()
+                .then_some(item.file_name())
+        })
+        .filter_map(|version| version.into_string().ok())
+        .filter(|name| !name.starts_with("."))
+        .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::*;
-    use semver::Version;
-    use std::fs;
-    use std::io::Write;
-
-    #[test]
-    fn test_ensure_paths() {
-        ensure_paths();
-        assert!(SUIVM_HOME.exists());
-        let bin_dir = SUIVM_HOME.join("bin");
-        assert!(bin_dir.exists());
-        let current_version_file = SUIVM_HOME.join(".version");
-        assert!(current_version_file.exists());
+fn print_version(
+    installed_versions: &Vec<String>,
+    latest: &Option<String>,
+    current: &Option<String>,
+    version: &String,
+) {
+    let mut flags = vec![];
+    if matches!(latest, Some(latest) if latest == version) {
+        flags.push("latest");
+    }
+    if installed_versions.contains(version) {
+        flags.push("installed");
+    }
+    if matches!(current, Some(current) if current == version) {
+        flags.push("current");
     }
 
-    #[test]
-    fn test_current_version_file_path() {
-        ensure_paths();
-        assert!(current_version_file_path().exists());
+    if flags.is_empty() {
+        println!("{version}");
+    } else {
+        println!("{version} ({})", flags.join(", "));
     }
+}
 
-    #[test]
-    fn test_version_binary_path() {
-        assert!(
-            version_binary_path(&Version::parse("0.14.0").unwrap())
-                == SUIVM_HOME.join("bin/sui-0.14.0")
-        );
+/// Print available versions and flags indicating installed, current and latest
+pub fn print_versions() {
+    let available_versions = match fetch_versions() {
+        Ok(versions) => versions,
+        Err(err) => return println!("Could not fetch versions: {err}"),
+    };
+
+    let current = current_version();
+    let installed_versions = &fetch_installed_versions();
+    let latest = available_versions.last().cloned();
+
+    for version in available_versions {
+        print_version(&installed_versions, &latest, &current, &version);
     }
+}
 
-    #[test]
-    fn test_current_version() {
-        ensure_paths();
-        let mut current_version_file =
-            fs::File::create(current_version_file_path().as_path()).unwrap();
-        current_version_file.write_all("0.14.0".as_bytes()).unwrap();
-        // Sync the file to disk before the read in current_version() to
-        // mitigate the read not seeing the written version bytes.
-        current_version_file.sync_all().unwrap();
-        assert!(
-            current_version().unwrap() == Version::parse("0.14.0").unwrap()
-        );
+pub fn print_latest_version() {
+    let latest = match fetch_latest_version() {
+        Ok(latest) => latest,
+        Err(err) => return println!("Could not fetch latest version: {err}"),
+    };
+
+    let current = current_version();
+    let installed_versions = &fetch_installed_versions();
+
+    print_version(&installed_versions, &None, &current, &latest);
+}
+
+pub fn print_installed() {
+    let latest = fetch_latest_version().ok();
+    let current = current_version();
+
+    for version in fetch_installed_versions() {
+        print_version(&Vec::new(), &latest, &current, &version);
     }
+}
 
-    #[test]
-    #[should_panic(expected = "sui 0.14.0 is not installed")]
-    fn test_uninstall_non_installed_version() {
-        uninstall_version(&Version::parse("0.14.0").unwrap()).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "sui 0.14.0 is currently in use")]
-    fn test_uninstalled_in_use_version() {
-        ensure_paths();
-        let version = Version::parse("0.14.0").unwrap();
-        let mut current_version_file =
-            fs::File::create(current_version_file_path().as_path()).unwrap();
-        current_version_file.write_all("0.14.0".as_bytes()).unwrap();
-        // Sync the file to disk before the read in current_version() to
-        // mitigate the read not seeing the written version bytes.
-        current_version_file.sync_all().unwrap();
-        // Create a fake binary for sui-0.14.0 in the bin directory
-        fs::File::create(version_binary_path(&version)).unwrap();
-        uninstall_version(&version).unwrap();
-    }
-
-    #[test]
-    fn test_read_installed_versions() {
-        ensure_paths();
-        let version = Version::parse("0.14.0").unwrap();
-        // Create a fake binary for sui-0.14.0 in the bin directory
-        fs::File::create(version_binary_path(&version)).unwrap();
-        let expected = vec![version];
-        assert!(read_installed_versions() == expected);
-        // Should ignore this file because its not sui- prefixed
-        fs::File::create(SUIVM_HOME.join("bin").join("garbage").as_path())
-            .unwrap();
-        assert!(read_installed_versions() == expected);
+pub fn print_current() {
+    let latest = fetch_latest_version().ok();
+    match current_version() {
+        Some(current) => print_version(&Vec::new(), &latest, &None, &current),
+        None => println!("Sui is not installed"),
     }
 }
