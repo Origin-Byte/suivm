@@ -8,9 +8,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 #[derive(Deserialize, Debug)]
-struct GithubRelease {
-    #[serde(rename = "tag_name")]
-    version: String,
+struct Release {
+    tag_name: String,
 }
 
 fn directory_suivm() -> PathBuf {
@@ -65,13 +64,12 @@ pub fn use_version(version: &String) -> Result<()> {
 }
 
 /// Install Sui version
-pub fn install_version(version: &str) -> Result<()> {
+pub fn install_version(version: &String) -> Result<()> {
     let url = &format!(
         "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
     );
 
-    let path = path_bin(version);
-    let mut file = File::create(&path)?;
+    let mut file = File::create(path_bin(version))?;
 
     let pb = ProgressBar::new(1);
     pb.set_style(ProgressStyle::default_bar()
@@ -88,7 +86,6 @@ pub fn install_version(version: &str) -> Result<()> {
     {
         let mut transfer = easy.transfer();
         transfer.progress_function(|dtotal, dlnow, _, _| {
-            // hi
             pb.set_length(dtotal as u64);
             pb.set_position(dlnow as u64);
             true
@@ -97,27 +94,33 @@ pub fn install_version(version: &str) -> Result<()> {
         transfer.perform()?;
     }
 
-    pb.finish_with_message(format!("Downloaded {version}"));
+    pb.finish_and_clear();
 
+    println!("Downloaded `{version}`");
     Ok(())
 }
 
 /// Uninstall Sui version
-pub fn uninstall_version(version: &str) -> Result<()> {
-    let current_version = current_version();
-    if matches!(current_version, Some(current) if current == version) {
-        let _ = fs::remove_file(path_version());
+pub fn uninstall_version(version: &String) -> Result<()> {
+    let path = &path_bin(version);
+    if path.as_path().exists() {
+        fs::remove_file(path)?;
     }
 
-    // Silence failures
-    let _ = fs::remove_file(path_bin(version));
+    let current_version = &current_version();
+    if matches!(current_version, Some(current) if current == version) {
+        let path = &path_version();
+        if path.as_path().exists() {
+            fs::remove_file(path_version())?;
+        }
+    }
 
     println!("Uninstalled Sui `{version}`");
     Ok(())
 }
 
-/// Retrieve a list of installable versions of sui using the GitHub API and tags on the Sui
-/// repository.
+/// Retrieve a list of installable versions of sui using the GitHub API and tags
+/// on the Sui repository.
 pub fn fetch_versions() -> Result<Vec<String>> {
     let mut dst = Vec::new();
 
@@ -134,8 +137,8 @@ pub fn fetch_versions() -> Result<Vec<String>> {
         transfer.perform()?;
     }
 
-    let versions: Vec<GithubRelease> = serde_json::from_slice(&dst)?;
-    Ok(versions.into_iter().map(|r| r.version).rev().collect())
+    let versions: Vec<Release> = serde_json::from_slice(&dst)?;
+    Ok(versions.into_iter().map(|r| r.tag_name).rev().collect())
 }
 
 pub fn fetch_latest_version() -> Result<String> {
@@ -143,7 +146,7 @@ pub fn fetch_latest_version() -> Result<String> {
     Ok(available_versions.last().unwrap().clone())
 }
 
-/// Read the installed sui-cli versions by reading the binaries in the SUIVM_HOME/bin directory.
+/// Read the installed sui-cli versions by reading files in bin directory
 pub fn fetch_installed_versions() -> Vec<String> {
     let home_dir = directory_bin();
     fs::read_dir(&home_dir)
