@@ -73,29 +73,28 @@ pub fn download_version(version: &String) -> Result<()> {
 
     let mut file = File::create(path_bin(version))?;
 
-    let pb = ProgressBar::new(1);
+    let res = ureq::get(&format!(
+        "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
+    ))
+    .call()?;
+    let len: u64 = res.header("Content-Length").unwrap().parse()?;
+    let mut rdr = res.into_reader();
+
+    let pb = ProgressBar::new(len);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
         .unwrap()
         .progress_chars("█  "));
     pb.set_message(format!("Downloading {version}"));
 
-    let mut easy = curl::easy::Easy::new();
-    easy.url(&format!(
-        "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
-    ))?;
-    easy.follow_location(true)?;
-    easy.progress(true)?;
+    let mut buf = [0; 8192];
+    while let Ok(len) = rdr.read(&mut buf) {
+        if len == 0 {
+            break;
+        }
 
-    {
-        let mut transfer = easy.transfer();
-        transfer.progress_function(|dtotal, dlnow, _, _| {
-            pb.set_length(dtotal as u64);
-            pb.set_position(dlnow as u64);
-            true
-        })?;
-        transfer.write_function(|buf| Ok(file.write(buf).unwrap()))?;
-        transfer.perform()?;
+        pb.set_position(pb.position() + len as u64);
+        file.write(&buf[..len]).unwrap();
     }
 
     pb.finish_and_clear();
@@ -132,22 +131,12 @@ pub fn uninstall_version(version: &String) -> Result<()> {
 /// Retrieve a list of installable versions of sui using the GitHub API and tags
 /// on the Sui repository.
 pub fn fetch_versions() -> Result<Vec<String>> {
-    let mut dst = Vec::new();
+    let file =
+        ureq::get("https://api.github.com/repos/MystenLabs/sui/releases")
+            .call()?
+            .into_reader();
 
-    let mut easy = curl::easy::Easy::new();
-    easy.url("https://api.github.com/repos/MystenLabs/sui/releases")?;
-    easy.useragent("suivm")?;
-
-    {
-        let mut transfer = easy.transfer();
-        transfer.write_function(|buf| {
-            dst.extend_from_slice(buf);
-            Ok(buf.len())
-        })?;
-        transfer.perform()?;
-    }
-
-    let versions: Vec<Release> = serde_json::from_slice(&dst)?;
+    let versions: Vec<Release> = serde_json::from_reader(file)?;
     Ok(versions.into_iter().map(|r| r.tag_name).rev().collect())
 }
 
