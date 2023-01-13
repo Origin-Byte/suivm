@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::process;
 
 #[derive(Deserialize, Debug)]
 struct Release {
@@ -49,11 +50,11 @@ pub fn current_version() -> Option<String> {
 }
 
 /// Install and use Sui version
-pub fn use_version(version: &String) -> Result<()> {
+pub fn use_version(version: &String, compile: bool) -> Result<()> {
     // Make sure the requested version is installed
     let installed_versions = fetch_installed_versions();
     if !installed_versions.contains(version) {
-        install_version(version)?
+        install_version(version, compile)?;
     }
 
     let mut current_version_file = File::create(path_version().as_path())?;
@@ -63,11 +64,24 @@ pub fn use_version(version: &String) -> Result<()> {
     Ok(())
 }
 
-/// Install Sui version
-pub fn install_version(version: &String) -> Result<()> {
-    let url = &format!(
-        "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
-    );
+pub fn install_version(version: &String, compile: bool) -> Result<()> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if compile {
+            compile_version(version)?;
+        } else {
+            download_version(version)?;
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    compile_version(version)?;
+
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn download_version(version: &String) -> Result<()> {
+    use std::os::unix::prelude::PermissionsExt;
 
     let mut file = File::create(path_bin(version))?;
 
@@ -79,7 +93,9 @@ pub fn install_version(version: &String) -> Result<()> {
     pb.set_message(format!("Downloading {version}"));
 
     let mut easy = curl::easy::Easy::new();
-    easy.url(&url)?;
+    easy.url(&format!(
+        "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
+    ))?;
     easy.follow_location(true)?;
     easy.progress(true)?;
 
@@ -97,6 +113,48 @@ pub fn install_version(version: &String) -> Result<()> {
     pb.finish_and_clear();
 
     println!("Downloaded `{version}`");
+
+    // Set execution permission for the file
+    let mut perms = file.metadata().unwrap().permissions();
+    perms.set_mode(perms.mode() | 0b001000000);
+    file.set_permissions(perms)?;
+
+    Ok(())
+}
+
+pub fn compile_version(version: &String) -> Result<()> {
+    let directory = directory_suivm();
+    let exit = std::process::Command::new("cargo")
+        .args([
+            "install",
+            "--locked",
+            "--git",
+            "https://github.com/MystenLabs/sui.git",
+            "--tag",
+            version,
+            "sui",
+            "--bin",
+            "sui",
+            "--root",
+            directory.as_os_str().to_str().unwrap(),
+        ])
+        .stdout(process::Stdio::inherit())
+        .stderr(process::Stdio::inherit())
+        .output()
+        .map_err(|err| {
+            anyhow::Error::msg(format!(
+                "Cargo install for {version} failed: {err}"
+            ))
+        })?;
+
+    if !exit.status.success() {
+        return Err(anyhow::Error::msg("Failed to compile Sui"));
+    }
+
+    // fs::rename(&directory.join("sui"), &directory.join(version))?;
+
+    println!("Compiled `{version}`");
+
     Ok(())
 }
 
@@ -161,73 +219,4 @@ pub fn fetch_installed_versions() -> Vec<String> {
         .filter_map(|version| version.into_string().ok())
         .filter(|name| !name.starts_with("."))
         .collect()
-}
-
-fn print_version(
-    installed_versions: &Vec<String>,
-    latest: &Option<String>,
-    current: &Option<String>,
-    version: &String,
-) {
-    let mut flags = vec![];
-    if matches!(latest, Some(latest) if latest == version) {
-        flags.push("latest");
-    }
-    if installed_versions.contains(version) {
-        flags.push("installed");
-    }
-    if matches!(current, Some(current) if current == version) {
-        flags.push("current");
-    }
-
-    if flags.is_empty() {
-        println!("{version}");
-    } else {
-        println!("{version} ({})", flags.join(", "));
-    }
-}
-
-/// Print available versions and flags indicating installed, current and latest
-pub fn print_versions() {
-    let available_versions = match fetch_versions() {
-        Ok(versions) => versions,
-        Err(err) => return println!("Could not fetch versions: {err}"),
-    };
-
-    let current = current_version();
-    let installed_versions = &fetch_installed_versions();
-    let latest = available_versions.last().cloned();
-
-    for version in available_versions {
-        print_version(&installed_versions, &latest, &current, &version);
-    }
-}
-
-pub fn print_latest_version() {
-    let latest = match fetch_latest_version() {
-        Ok(latest) => latest,
-        Err(err) => return println!("Could not fetch latest version: {err}"),
-    };
-
-    let current = current_version();
-    let installed_versions = &fetch_installed_versions();
-
-    print_version(&installed_versions, &None, &current, &latest);
-}
-
-pub fn print_installed() {
-    let latest = fetch_latest_version().ok();
-    let current = current_version();
-
-    for version in fetch_installed_versions() {
-        print_version(&Vec::new(), &latest, &current, &version);
-    }
-}
-
-pub fn print_current() {
-    let latest = fetch_latest_version().ok();
-    match current_version() {
-        Some(current) => print_version(&Vec::new(), &latest, &None, &current),
-        None => println!("Sui is not installed"),
-    }
 }
