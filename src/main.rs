@@ -16,12 +16,22 @@ enum Suivm {
     Installed,
     #[clap(about = "Display current Sui version")]
     Status,
-    #[clap(about = "Installs Sui version")]
-    Install { version: String },
     #[clap(about = "Uninstalls Sui version")]
     Uninstall { version: String },
+    #[clap(about = "Installs Sui version")]
+    Install {
+        /// Force Sui to compile instead of downloading when possible
+        #[arg(short, long)]
+        compile: bool,
+        version: String,
+    },
     #[clap(about = "Use Sui version and install it if missing")]
-    Use { version: String },
+    Use {
+        /// Force Sui to compile instead of downloading when possible
+        #[arg(short, long)]
+        compile: bool,
+        version: String,
+    },
 }
 
 fn print_version(
@@ -114,9 +124,11 @@ fn main() -> Result<()> {
         Suivm::Uninstall { version } => {
             suivm::uninstall_version(&parse_version(version)?)
         }
-        Suivm::Install { version } => {
-            suivm::install_version(&parse_version(version)?)
+        Suivm::Install { compile, version } => {
+            suivm::install_version(&parse_version(version)?, compile)
         }
-        Suivm::Use { version } => suivm::use_version(&parse_version(version)?),
+        Suivm::Use { compile, version } => {
+            suivm::use_version(&parse_version(version)?, compile)
+        }
     }
 }

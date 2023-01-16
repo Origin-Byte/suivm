@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::process;
 
 #[derive(Deserialize, Debug)]
 struct Release {
@@ -49,11 +50,11 @@ pub fn current_version() -> Option<String> {
 }
 
 /// Install and use Sui version
-pub fn use_version(version: &String) -> Result<()> {
+pub fn use_version(version: &String, compile: bool) -> Result<()> {
     // Make sure the requested version is installed
     let installed_versions = fetch_installed_versions();
     if !installed_versions.contains(version) {
-        install_version(version)?;
+        install_version(version, compile)?;
     }
 
     let mut current_version_file = File::create(path_version().as_path())?;
@@ -63,11 +64,22 @@ pub fn use_version(version: &String) -> Result<()> {
     Ok(())
 }
 
-pub fn install_version(version: &String) -> Result<()> {
-    // TODO: Compile for non linux
-    download_version(version)
+pub fn install_version(version: &String, compile: bool) -> Result<()> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if compile {
+            compile_version(version)?;
+        } else {
+            download_version(version)?;
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    compile_version(version)?;
+
+    Ok(())
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn download_version(version: &String) -> Result<()> {
     use std::os::unix::prelude::PermissionsExt;
 
@@ -105,6 +117,42 @@ pub fn download_version(version: &String) -> Result<()> {
     let mut perms = file.metadata().unwrap().permissions();
     perms.set_mode(perms.mode() | 0b001000000);
     file.set_permissions(perms)?;
+
+    Ok(())
+}
+
+pub fn compile_version(version: &String) -> Result<()> {
+    let directory = directory_suivm();
+    let exit = std::process::Command::new("cargo")
+        .args([
+            "install",
+            "--locked",
+            "--git",
+            "https://github.com/MystenLabs/sui.git",
+            "--rev",
+            version,
+            "sui",
+            "--bin",
+            "sui",
+            "--root",
+            directory.as_os_str().to_str().unwrap(),
+        ])
+        .stdout(process::Stdio::inherit())
+        .stderr(process::Stdio::inherit())
+        .output()
+        .map_err(|err| {
+            anyhow::Error::msg(format!(
+                "Cargo install for {version} failed: {err}"
+            ))
+        })?;
+
+    if !exit.status.success() {
+        return Err(anyhow::Error::msg("Failed to compile Sui"));
+    }
+
+    // fs::rename(&directory.join("sui"), &directory.join(version))?;
+
+    println!("Compiled `{version}`");
 
     Ok(())
 }
