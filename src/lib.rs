@@ -8,11 +8,6 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process;
 
-#[derive(Deserialize, Debug)]
-struct Release {
-    tag_name: String,
-}
-
 fn directory_suivm() -> PathBuf {
     let mut home = dirs::home_dir().expect("Could not find home directory");
     home.push(".suivm");
@@ -65,13 +60,22 @@ pub fn use_version(version: &String, compile: bool) -> Result<()> {
 }
 
 pub fn install_version(version: &String, compile: bool) -> Result<()> {
+    println!("Installing Sui `{version}`");
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        if compile {
-            compile_version(version)?;
-        } else {
-            download_version(version)?;
+        if !compile {
+            if let Ok(available_versions) = fetch_versions() {
+                if available_versions.contains(version) {
+                    return download_version(version);
+                }
+            } else {
+                println!("Could not fetch available versions");
+            }
         }
+
+        println!("Could not find version, assuming revision");
+        compile_version(version)?;
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     compile_version(version)?;
@@ -127,12 +131,11 @@ pub fn compile_version(version: &String) -> Result<()> {
         .args([
             "install",
             "--locked",
+            "--force",
             "--git",
             "https://github.com/MystenLabs/sui.git",
             "--rev",
             version,
-            "sui",
-            "--bin",
             "sui",
             "--root",
             directory.as_os_str().to_str().unwrap(),
@@ -150,7 +153,7 @@ pub fn compile_version(version: &String) -> Result<()> {
         return Err(anyhow::Error::msg("Failed to compile Sui"));
     }
 
-    // fs::rename(&directory.join("sui"), &directory.join(version))?;
+    fs::rename(&directory.join("sui"), path_bin(version))?;
 
     println!("Compiled `{version}`");
 
@@ -179,6 +182,11 @@ pub fn uninstall_version(version: &String) -> Result<()> {
 /// Retrieve a list of installable versions of sui using the GitHub API and tags
 /// on the Sui repository.
 pub fn fetch_versions() -> Result<Vec<String>> {
+    #[derive(Deserialize, Debug)]
+    struct Release {
+        tag_name: String,
+    }
+
     let file =
         ureq::get("https://api.github.com/repos/MystenLabs/sui/releases")
             .call()?
@@ -190,7 +198,26 @@ pub fn fetch_versions() -> Result<Vec<String>> {
 
 pub fn fetch_latest_version() -> Result<String> {
     let available_versions = fetch_versions()?;
-    Ok(available_versions.last().unwrap().clone())
+    available_versions
+        .last()
+        .cloned()
+        .ok_or_else(|| anyhow::Error::msg("No versions found"))
+}
+
+pub fn fetch_latest_branch(branch: &str) -> Result<String> {
+    #[derive(Deserialize, Debug)]
+    struct Commit {
+        sha: String,
+    }
+
+    let file = ureq::get(&format!(
+        "https://api.github.com/repos/MystenLabs/sui/commits/{branch}"
+    ))
+    .call()?
+    .into_reader();
+
+    let commit: Commit = serde_json::from_reader(file)?;
+    Ok(commit.sha)
 }
 
 /// Read the installed sui-cli versions by reading files in bin directory

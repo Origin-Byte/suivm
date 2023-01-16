@@ -23,6 +23,7 @@ enum Suivm {
         /// Force Sui to compile instead of downloading when possible
         #[arg(short, long)]
         compile: bool,
+        /// Sui release tag, branch, or revision
         version: String,
     },
     #[clap(about = "Use Sui version and install it if missing")]
@@ -30,6 +31,7 @@ enum Suivm {
         /// Force Sui to compile instead of downloading when possible
         #[arg(short, long)]
         compile: bool,
+        /// Sui release tag, branch, or revision
         version: String,
     },
 }
@@ -104,14 +106,16 @@ fn print_current() {
 
 // If `latest` is passed use the latest available version.
 fn parse_version(version: String) -> Result<String, Error> {
-    if version == "latest" {
-        suivm::fetch_latest_version()
-    } else {
-        let available_versions = fetch_versions()?;
-        if !available_versions.contains(&version) {
-            return Err(anyhow!("`{version}` is not a valid version, check available versions using `suivm list`"));
+    match version.as_str() {
+        "latest" => suivm::fetch_latest_version(),
+        "devnet" => suivm::fetch_latest_branch("devnet"),
+        _ => {
+            let available_versions = fetch_versions()?;
+            if !available_versions.contains(&version) {
+                return Err(anyhow!("`{version}` is not a valid version, check available versions using `suivm list`"));
+            }
+            Ok(version)
         }
-        Ok(version)
     }
 }
 
