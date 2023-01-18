@@ -5,9 +5,3 @@ charset = utf-8
 indent_style = space
 insert_final_newline = true
 trim_trailing_whitespace = true
-
-[*.move]
-indent_size = 4
-
-[*.json]
-indent_size = 4

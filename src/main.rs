@@ -1,7 +1,6 @@
-mod cmd;
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Error, Result};
 use clap::Parser;
-use semver::Version;
+use suivm::fetch_versions;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -9,60 +8,131 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(name = "suivm")]
 #[command(bin_name = "suivm")]
 enum Suivm {
+    #[clap(about = "List latest Sui version")]
     Latest,
+    #[clap(about = "List all available Sui versions")]
     List,
-    #[clap(about = "Uninstall a version of suivm")]
-    Uninstall {
+    #[clap(about = "List all installed Sui versions")]
+    Installed,
+    #[clap(about = "Display current Sui version")]
+    Status,
+    #[clap(about = "Uninstalls Sui version")]
+    Uninstall { version: String },
+    #[clap(about = "Installs Sui version")]
+    Install {
+        /// Force Sui to compile instead of downloading when possible
+        #[arg(short, long)]
+        compile: bool,
+        /// Sui release tag, branch, or revision
         version: String,
     },
-    #[clap(
-        about = "Switch to specified version of suivm and install it if missing"
-    )]
-    Switch {
+    #[clap(about = "Use Sui version and install it if missing")]
+    Use {
+        /// Force Sui to compile instead of downloading when possible
+        #[arg(short, long)]
+        compile: bool,
+        /// Sui release tag, branch, or revision
         version: String,
-        #[clap(long)]
-        /// Flag to force installation even if the version
-        /// is already installed
-        force: bool,
     },
-    ListLocal,
 }
-//
-// /// Remove from locally installed versions
-// #[derive(clap::Args)]
-// struct Remove {
-//     #[clap(parse(try_from_str = parse_version))]
-//     version: String,
-// }
 
-// /// Use given version, install if not yet
-// #[derive(clap::Args)]
-// struct Switch {
-//     #[clap(parse(try_from_str = parse_version))]
-//     version: String,
-// }
+fn print_version(
+    installed_versions: &Vec<String>,
+    latest: &Option<String>,
+    current: &Option<String>,
+    version: &String,
+) {
+    let mut flags = vec![];
+    if matches!(latest, Some(latest) if latest == version) {
+        flags.push("latest");
+    }
+    if installed_versions.contains(version) {
+        flags.push("installed");
+    }
+    if matches!(current, Some(current) if current == version) {
+        flags.push("current");
+    }
 
-// If `latest` is passed use the latest available version.
-async fn parse_version(version: &str) -> Result<Version, Error> {
-    if version == "latest" {
-        suivm::get_latest_version().await
+    if flags.is_empty() {
+        println!("{version}");
     } else {
-        Version::parse(version).map_err(|e| anyhow::anyhow!(e))
+        println!("{version} ({})", flags.join(", "));
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    suivm::ensure_paths();
+fn print_versions() {
+    let available_versions = match fetch_versions() {
+        Ok(versions) => versions,
+        Err(err) => return println!("Could not fetch versions: {err}"),
+    };
+
+    let current = suivm::current_version();
+    let installed_versions = &suivm::fetch_installed_versions();
+    let latest = available_versions.last().cloned();
+
+    for version in available_versions {
+        print_version(&installed_versions, &latest, &current, &version);
+    }
+}
+
+fn print_latest_version() {
+    let latest = match suivm::fetch_latest_version() {
+        Ok(latest) => latest,
+        Err(err) => return println!("Could not fetch latest version: {err}"),
+    };
+
+    let current = suivm::current_version();
+    let installed_versions = &suivm::fetch_installed_versions();
+
+    print_version(&installed_versions, &None, &current, &latest);
+}
+
+fn print_installed() {
+    let latest = suivm::fetch_latest_version().ok();
+    let current = suivm::current_version();
+
+    for version in suivm::fetch_installed_versions() {
+        print_version(&Vec::new(), &latest, &current, &version);
+    }
+}
+
+fn print_current() {
+    let latest = suivm::fetch_latest_version().ok();
+    match suivm::current_version() {
+        Some(current) => print_version(&Vec::new(), &latest, &None, &current),
+        None => println!("Sui is not installed"),
+    }
+}
+
+// If `latest` is passed use the latest available version.
+fn parse_version(version: String) -> Result<String, Error> {
+    match version.as_str() {
+        "latest" => suivm::fetch_latest_version(),
+        "devnet" => suivm::fetch_latest_branch("devnet"),
+        _ => {
+            let available_versions = fetch_versions()?;
+            if !available_versions.contains(&version) {
+                return Err(anyhow!("`{version}` is not a valid version, check available versions using `suivm list`"));
+            }
+            Ok(version)
+        }
+    }
+}
+
+fn main() -> Result<()> {
     match Suivm::parse() {
-        Suivm::List => suivm::list_versions().await,
+        Suivm::Latest => Ok(print_latest_version()),
+        Suivm::List => Ok(print_versions()),
+        Suivm::Installed => Ok(print_installed()),
+        Suivm::Status => Ok(print_current()),
         Suivm::Uninstall { version } => {
-            suivm::uninstall_version(&parse_version(&version).await?)
+            suivm::uninstall_version(&parse_version(version)?)
         }
-        Suivm::Switch { version, force } => {
-            suivm::switch_version(&parse_version(&version).await?, force).await
+        Suivm::Install { compile, version } => {
+            suivm::install_version(&parse_version(version)?, compile)
         }
-        Suivm::Latest => suivm::list_versions().await,
-        Suivm::ListLocal => suivm::list_versions().await,
+        Suivm::Use { compile, version } => {
+            suivm::use_version(&parse_version(version)?, compile)
+        }
     }
 }
