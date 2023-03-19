@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use serde::Deserialize;
@@ -45,11 +45,13 @@ pub fn current_version() -> Option<String> {
 }
 
 /// Install and use Sui version
-pub fn use_version(version: &String, compile: bool) -> Result<()> {
+pub fn use_version(alias: &String, compile: bool) -> Result<()> {
+    let version = fetch_version(alias)?;
+
     // Make sure the requested version is installed
     let installed_versions = fetch_installed_versions();
-    if !installed_versions.contains(version) {
-        install_version(version, compile)?;
+    if !installed_versions.contains(&version) {
+        install_version(alias, compile)?;
     }
 
     let mut current_version_file = File::create(path_version().as_path())?;
@@ -59,35 +61,35 @@ pub fn use_version(version: &String, compile: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn install_version(version: &String, compile: bool) -> Result<()> {
-    println!("Installing Sui `{version}`");
+pub fn install_version(alias: &String, _compile: bool) -> Result<()> {
+    let version = fetch_version(alias)?;
+
+    println!("Installing Sui `{alias} ({version})`");
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        if !compile {
-            if let Ok(available_versions) = fetch_versions() {
-                if available_versions.contains(version) {
-                    return download_version(version);
-                }
-            } else {
-                println!("Could not fetch available versions");
-            }
+    if !_compile {
+        let available_versions = fetch_versions()?;
+        if available_versions.contains(&alias) {
+            download_version(&version)?;
+            println!("Downloaded Sui `{alias} ({version})`");
+            return Ok(());
         }
-
-        println!("Could not find version, assuming revision");
-        compile_version(version)?;
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    compile_version(version)?;
+
+    compile_version(&version)?;
+    println!("Compiled Sui `{alias} ({version})`");
 
     Ok(())
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn download_version(version: &String) -> Result<()> {
+fn download_version(version: &String) -> Result<()> {
     use std::os::unix::prelude::PermissionsExt;
 
-    let mut file = File::create(path_bin(version))?;
+    let mut temp_path = directory_bin();
+    temp_path.push(format!(".{version}"));
+
+    let mut file = File::create(&temp_path)?;
 
     let res = ureq::get(&format!(
         "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
@@ -101,7 +103,7 @@ pub fn download_version(version: &String) -> Result<()> {
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
         .unwrap()
         .progress_chars("█  "));
-    pb.set_message(format!("Downloading {version}"));
+    pb.set_message(format!("Downloading Sui `{version}`"));
 
     let mut buf = [0; 8192];
     while let Ok(len) = rdr.read(&mut buf) {
@@ -115,17 +117,17 @@ pub fn download_version(version: &String) -> Result<()> {
 
     pb.finish_and_clear();
 
-    println!("Downloaded `{version}`");
-
     // Set execution permission for the file
     let mut perms = file.metadata().unwrap().permissions();
     perms.set_mode(perms.mode() | 0b001000000);
     file.set_permissions(perms)?;
 
+    fs::rename(&temp_path, path_bin(&version))?;
+
     Ok(())
 }
 
-pub fn compile_version(version: &String) -> Result<()> {
+fn compile_version(version: &String) -> Result<()> {
     let directory = directory_suivm();
     let exit = std::process::Command::new("cargo")
         .args([
@@ -135,48 +137,65 @@ pub fn compile_version(version: &String) -> Result<()> {
             "--git",
             "https://github.com/MystenLabs/sui.git",
             "--rev",
-            version,
+            &version,
             "sui",
             "--root",
-            directory.as_os_str().to_str().unwrap(),
+            &directory.to_string_lossy(),
         ])
         .stdout(process::Stdio::inherit())
         .stderr(process::Stdio::inherit())
         .output()
-        .map_err(|err| {
-            anyhow::Error::msg(format!(
-                "Cargo install for {version} failed: {err}"
-            ))
-        })?;
+        .map_err(|err| anyhow!("Install for Sui `{version}` failed: {err}"))?;
 
     if !exit.status.success() {
-        return Err(anyhow::Error::msg("Failed to compile Sui"));
+        return Err(anyhow!("Failed to compile Sui `{version}`"));
     }
 
-    fs::rename(&directory.join("sui"), path_bin(version))?;
-
-    println!("Compiled `{version}`");
+    fs::rename(path_bin("sui"), path_bin(&version))?;
 
     Ok(())
 }
 
 /// Uninstall Sui version
-pub fn uninstall_version(version: &String) -> Result<()> {
-    let path = &path_bin(version);
+pub fn uninstall_version(alias: &String) -> Result<()> {
+    let version = fetch_version(alias)?;
+
+    let path = &path_bin(&version);
     if path.as_path().exists() {
         fs::remove_file(path)?;
     }
 
     let current_version = &current_version();
-    if matches!(current_version, Some(current) if current == version) {
+    if matches!(current_version, Some(current) if current == &version) {
         let path = &path_version();
         if path.as_path().exists() {
             fs::remove_file(path_version())?;
         }
     }
 
-    println!("Uninstalled Sui `{version}`");
+    println!("Uninstalled Sui `{alias} ({version})`");
     Ok(())
+}
+
+/// Resolves aliases to their commit hash
+fn fetch_version(alias: &String) -> Result<String> {
+    match fetch_versions() {
+        Ok(available_versions) => {
+            if available_versions.contains(alias) {
+                return Ok(alias.clone());
+            }
+        }
+        Err(err) => {
+            eprintln!("Could not fetch available versions, falling back to commit version check: {err}");
+        }
+    };
+
+    // Will treat branch names and commit hashes as valid commits
+    if let Ok(version) = fetch_latest_commit(&alias) {
+        return Ok(version);
+    }
+
+    Err(anyhow!("`{alias}` is neither a valid version, branch, or commit, check available versions using `suivm list`"))
 }
 
 /// Retrieve a list of installable versions of sui using the GitHub API and tags
@@ -204,7 +223,7 @@ pub fn fetch_latest_version() -> Result<String> {
         .ok_or_else(|| anyhow::Error::msg("No versions found"))
 }
 
-pub fn fetch_latest_branch(branch: &str) -> Result<String> {
+pub fn fetch_latest_commit(branch: &str) -> Result<String> {
     #[derive(Deserialize, Debug)]
     struct Commit {
         sha: String,
