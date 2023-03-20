@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Error, Result};
+use anyhow::Result;
 use clap::Parser;
 use suivm::fetch_versions;
 
@@ -100,22 +100,15 @@ fn print_current() {
     let latest = suivm::fetch_latest_version().ok();
     match suivm::current_version() {
         Some(current) => print_version(&Vec::new(), &latest, &None, &current),
-        None => println!("Sui is not installed"),
+        None => println!("Sui is not installed. Run `suivm use latest`"),
     }
 }
 
-// If `latest` is passed use the latest available version.
-fn parse_version(version: String) -> Result<String, Error> {
-    match version.as_str() {
-        "latest" => suivm::fetch_latest_version(),
-        "devnet" => suivm::fetch_latest_branch("devnet"),
-        _ => {
-            let available_versions = fetch_versions()?;
-            if !available_versions.contains(&version) {
-                return Err(anyhow!("`{version}` is not a valid version, check available versions using `suivm list`"));
-            }
-            Ok(version)
-        }
+fn handle_alias(alias: &str) -> Result<String> {
+    if alias == "latest" {
+        suivm::fetch_latest_version()
+    } else {
+        Ok(alias.to_string())
     }
 }
 
@@ -125,14 +118,14 @@ fn main() -> Result<()> {
         Suivm::List => Ok(print_versions()),
         Suivm::Installed => Ok(print_installed()),
         Suivm::Status => Ok(print_current()),
-        Suivm::Uninstall { version } => {
-            suivm::uninstall_version(&parse_version(version)?)
-        }
+        Suivm::Uninstall { version } => suivm::uninstall_version(&version),
         Suivm::Install { compile, version } => {
-            suivm::install_version(&parse_version(version)?, compile)
+            let version = handle_alias(&version)?;
+            suivm::install_version(&version, compile)
         }
         Suivm::Use { compile, version } => {
-            suivm::use_version(&parse_version(version)?, compile)
+            let version = handle_alias(&version)?;
+            suivm::use_version(&version, compile)
         }
     }
 }
