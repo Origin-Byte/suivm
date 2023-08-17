@@ -69,7 +69,7 @@ pub fn install_version(alias: &String, _compile: bool) -> Result<()> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if !_compile {
         let available_versions = fetch_versions()?;
-        if available_versions.contains(&alias) {
+        if available_versions.contains(alias) {
             download_version(&version)?;
             println!("Downloaded Sui `{alias} ({version})`");
             return Ok(());
@@ -115,7 +115,7 @@ fn download_version(version: &String) -> Result<()> {
         }
 
         pb.set_position(pb.position() + len as u64);
-        tar_gz_buffer.write(&buf[..len]).unwrap();
+        tar_gz_buffer.write_all(&buf[..len])?;
     }
 
     pb.finish_and_clear();
@@ -125,17 +125,23 @@ fn download_version(version: &String) -> Result<()> {
 
     let target_path = String::from("./target/release/sui-ubuntu-x86_64");
 
-    let entry = archive
+    let unpacked = archive
         .entries()?
         .filter_map(|entry| entry.ok())
-        .find(|entry| entry.path_bytes() == target_path.as_bytes());
-
-    if let Some(mut entry) = entry {
-        _ = entry.unpack(path_bin(&version));
-    }
+        .find(|entry| entry.path_bytes() == target_path.as_bytes())
+        .ok_or(anyhow!(
+            "{target_path:?} was not present in downloaded archive"
+        ))?
+        .unpack(path_bin(version))?;
 
     // Set execution permission for the file
-    let file = File::open(path_bin(&version))?;
+    let file = match unpacked {
+        tar::Unpacked::File(file) => file,
+        _ => return Err(anyhow!(
+            "Unpacked file was a directory, hardlink, symlink, or other node"
+        )),
+    };
+
     let mut perms = file.metadata().unwrap().permissions();
     perms.set_mode(perms.mode() | 0b001000000);
     file.set_permissions(perms)?;
@@ -153,7 +159,7 @@ fn compile_version(version: &String) -> Result<()> {
             "--git",
             "https://github.com/MystenLabs/sui.git",
             "--rev",
-            &version,
+            version,
             "sui",
             "--root",
             &directory.to_string_lossy(),
@@ -167,7 +173,7 @@ fn compile_version(version: &String) -> Result<()> {
         return Err(anyhow!("Failed to compile Sui `{version}`"));
     }
 
-    fs::rename(path_bin("sui"), path_bin(&version))?;
+    fs::rename(path_bin("sui"), path_bin(version))?;
 
     Ok(())
 }
@@ -207,7 +213,7 @@ fn fetch_version(alias: &String) -> Result<String> {
     };
 
     // Will treat branch names and commit hashes as valid commits
-    if let Ok(version) = fetch_latest_commit(&alias) {
+    if let Ok(version) = fetch_latest_commit(alias) {
         return Ok(version);
     }
 
@@ -258,7 +264,7 @@ pub fn fetch_latest_commit(branch: &str) -> Result<String> {
 /// Read the installed sui-cli versions by reading files in bin directory
 pub fn fetch_installed_versions() -> Vec<String> {
     let home_dir = directory_bin();
-    fs::read_dir(&home_dir)
+    fs::read_dir(home_dir)
         .unwrap()
         .filter_map(Result::ok)
         .filter_map(|item| {
@@ -268,6 +274,6 @@ pub fn fetch_installed_versions() -> Vec<String> {
                 .then_some(item.file_name())
         })
         .filter_map(|version| version.into_string().ok())
-        .filter(|name| !name.starts_with("."))
+        .filter(|name| !name.starts_with('.'))
         .collect()
 }
