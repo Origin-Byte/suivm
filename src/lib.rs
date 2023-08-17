@@ -84,15 +84,18 @@ pub fn install_version(alias: &String, _compile: bool) -> Result<()> {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn download_version(version: &String) -> Result<()> {
-    use std::os::unix::prelude::PermissionsExt;
+    use std::{io::Cursor, os::unix::prelude::PermissionsExt};
+
+    use flate2::read::GzDecoder;
+    use tar::Archive;
 
     let mut temp_path = directory_bin();
     temp_path.push(format!(".{version}"));
 
-    let mut file = File::create(&temp_path)?;
+    let mut tar_gz_buffer: Vec<u8> = vec![];
 
     let res = ureq::get(&format!(
-        "https://github.com/MystenLabs/sui/releases/download/{version}/sui",
+        "https://github.com/MystenLabs/sui/releases/download/{version}/sui-{version}-ubuntu-x86_64.tgz",
     ))
     .call()?;
     let len: u64 = res.header("Content-Length").unwrap().parse()?;
@@ -112,17 +115,30 @@ fn download_version(version: &String) -> Result<()> {
         }
 
         pb.set_position(pb.position() + len as u64);
-        file.write(&buf[..len]).unwrap();
+        tar_gz_buffer.write(&buf[..len]).unwrap();
     }
 
     pb.finish_and_clear();
 
+    let cursor = Cursor::new(tar_gz_buffer);
+    let mut archive = Archive::new(GzDecoder::new(cursor));
+
+    let target_path = String::from("./target/release/sui-ubuntu-x86_64");
+
+    let entry = archive
+        .entries()?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| entry.path_bytes() == target_path.as_bytes());
+
+    if let Some(mut entry) = entry {
+        _ = entry.unpack(path_bin(&version));
+    }
+
     // Set execution permission for the file
+    let file = File::open(path_bin(&version))?;
     let mut perms = file.metadata().unwrap().permissions();
     perms.set_mode(perms.mode() | 0b001000000);
     file.set_permissions(perms)?;
-
-    fs::rename(&temp_path, path_bin(&version))?;
 
     Ok(())
 }
