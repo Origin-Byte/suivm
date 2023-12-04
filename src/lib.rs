@@ -131,9 +131,11 @@ fn download_version(version: &String) -> Result<()> {
     let mut archive = Archive::new(GzDecoder::new(cursor));
 
     #[cfg(not(windows))]
-    let target_path = format!("./target/release/sui-{os_postfix}");
+    let exe_postfix = "";
     #[cfg(windows)]
-    let target_path = format!(".\\target\\release\\sui-{os_postfix}");
+    let exe_postfix = ".exe";
+
+    let target_path = format!("./target/release/sui-{os_postfix}{exe_postfix}");
 
     let unpacked = archive
         .entries()?
@@ -145,22 +147,20 @@ fn download_version(version: &String) -> Result<()> {
         .unpack(path_bin(version))?;
 
     // Set execution permission for the file
-    let file = match unpacked {
+    let _file = match unpacked {
         tar::Unpacked::File(file) => file,
-        _ => {
-            return Err(anyhow!(
+        _ => return Err(anyhow!(
             "Unpacked file was a directory, hardlink, symlink, or other node"
-        ))
-        }
+        )),
     };
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut perms = file.metadata().unwrap().permissions();
+        let mut perms = _file.metadata().unwrap().permissions();
         perms.set_mode(perms.mode() | 0b001000000);
-        file.set_permissions(perms)?;
+        _file.set_permissions(perms)?;
     }
 
     Ok(())
