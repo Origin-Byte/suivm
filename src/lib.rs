@@ -66,7 +66,6 @@ pub fn install_version(alias: &String, _compile: bool) -> Result<()> {
 
     println!("Installing Sui `{alias} ({version})`");
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if !_compile {
         let available_versions = fetch_versions()?;
         if available_versions.contains(alias) {
@@ -82,7 +81,6 @@ pub fn install_version(alias: &String, _compile: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn download_version(version: &String) -> Result<()> {
     use std::{io::Cursor, os::unix::prelude::PermissionsExt};
 
@@ -94,8 +92,17 @@ fn download_version(version: &String) -> Result<()> {
 
     let mut tar_gz_buffer: Vec<u8> = vec![];
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let os_postfix = "macos-arm64";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let os_postfix = "macos-x86_64";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let os_postfix = "ubuntu-x86_64";
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    let os_postfix = "windows-x86_64";
+
     let res = ureq::get(&format!(
-        "https://github.com/MystenLabs/sui/releases/download/{version}/sui-{version}-ubuntu-x86_64.tgz",
+        "https://github.com/MystenLabs/sui/releases/download/{version}/sui-{version}-{os_postfix}.tgz",
     ))
     .call()?;
     let len: u64 = res.header("Content-Length").unwrap().parse()?;
@@ -123,7 +130,7 @@ fn download_version(version: &String) -> Result<()> {
     let cursor = Cursor::new(tar_gz_buffer);
     let mut archive = Archive::new(GzDecoder::new(cursor));
 
-    let target_path = String::from("./target/release/sui-ubuntu-x86_64");
+    let target_path = format!("./target/release/sui-{os_postfix}");
 
     let unpacked = archive
         .entries()?
@@ -137,9 +144,11 @@ fn download_version(version: &String) -> Result<()> {
     // Set execution permission for the file
     let file = match unpacked {
         tar::Unpacked::File(file) => file,
-        _ => return Err(anyhow!(
+        _ => {
+            return Err(anyhow!(
             "Unpacked file was a directory, hardlink, symlink, or other node"
-        )),
+        ))
+        }
     };
 
     let mut perms = file.metadata().unwrap().permissions();
