@@ -130,7 +130,10 @@ fn download_version(version: &String) -> Result<()> {
     let cursor = Cursor::new(tar_gz_buffer);
     let mut archive = Archive::new(GzDecoder::new(cursor));
 
+    #[cfg(not(windows))]
     let target_path = format!("./target/release/sui-{os_postfix}");
+    #[cfg(windows)]
+    let target_path = format!(".\\target\\release\\sui-{os_postfix}");
 
     let unpacked = archive
         .entries()?
