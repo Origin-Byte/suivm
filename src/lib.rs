@@ -82,7 +82,7 @@ pub fn install_version(alias: &String, _compile: bool) -> Result<()> {
 }
 
 fn download_version(version: &String) -> Result<()> {
-    use std::{io::Cursor, os::unix::prelude::PermissionsExt};
+    use std::io::Cursor;
 
     use flate2::read::GzDecoder;
     use tar::Archive;
@@ -151,9 +151,14 @@ fn download_version(version: &String) -> Result<()> {
         }
     };
 
-    let mut perms = file.metadata().unwrap().permissions();
-    perms.set_mode(perms.mode() | 0b001000000);
-    file.set_permissions(perms)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = file.metadata().unwrap().permissions();
+        perms.set_mode(perms.mode() | 0b001000000);
+        file.set_permissions(perms)?;
+    }
 
     Ok(())
 }
