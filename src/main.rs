@@ -37,7 +37,7 @@ enum Suivm {
 }
 
 fn print_version(
-    installed_versions: &Vec<String>,
+    installed_versions: &[String],
     latest: &Option<String>,
     current: &Option<String>,
     version: &String,
@@ -71,7 +71,7 @@ fn print_versions() {
     let latest = available_versions.last().cloned();
 
     for version in available_versions {
-        print_version(&installed_versions, &latest, &current, &version);
+        print_version(installed_versions, &latest, &current, &version);
     }
 }
 
@@ -84,7 +84,7 @@ fn print_latest_version() {
     let current = suivm::current_version();
     let installed_versions = &suivm::fetch_installed_versions();
 
-    print_version(&installed_versions, &None, &current, &latest);
+    print_version(installed_versions, &None, &current, &latest);
 }
 
 fn print_installed() {
@@ -114,10 +114,22 @@ fn handle_alias(alias: &str) -> Result<String> {
 
 fn main() -> Result<()> {
     match Suivm::parse() {
-        Suivm::Latest => Ok(print_latest_version()),
-        Suivm::List => Ok(print_versions()),
-        Suivm::Installed => Ok(print_installed()),
-        Suivm::Status => Ok(print_current()),
+        Suivm::Latest => {
+            print_latest_version();
+            Ok(())
+        }
+        Suivm::List => {
+            print_versions();
+            Ok(())
+        }
+        Suivm::Installed => {
+            print_installed();
+            Ok(())
+        }
+        Suivm::Status => {
+            print_current();
+            Ok(())
+        }
         Suivm::Uninstall { version } => suivm::uninstall_version(&version),
         Suivm::Install { compile, version } => {
             let version = handle_alias(&version)?;
